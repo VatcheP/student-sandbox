@@ -2,9 +2,11 @@ import argparse
 import csv
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any, TextIO
 
-from csv2json.converter import csv_to_json
+from csv2json.converter import csv_to_json_rows
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,64 +15,61 @@ def build_parser() -> argparse.ArgumentParser:
         description="Convert CSV files to JSON.",
     )
 
-    parser.add_argument(
-        "--input",
-        "-i",
-        type=Path,
-        help="Input CSV file. Defaults to stdin.",
-    )
-
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        help="Output JSON file. Defaults to stdout.",
-    )
-
-    parser.add_argument(
-        "--columns",
-        help="Comma-separated list of columns to include.",
-    )
-
-    parser.add_argument(
-        "--no-infer-types",
-        action="store_true",
-        help="Keep all CSV values as strings.",
-    )
-
-    parser.add_argument(
-        "--pretty",
-        action="store_true",
-        help="Pretty-print JSON output.",
-    )
+    parser.add_argument("--input", "-i", type=Path, help="Input CSV file. Defaults to stdin.")
+    parser.add_argument("--output", "-o", type=Path, help="Output JSON file. Defaults to stdout.")
+    parser.add_argument("--columns", help="Comma-separated list of columns to include.")
+    parser.add_argument("--no-infer-types", action="store_true", help="Keep all CSV values as strings.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
     return parser
 
 
-def read_csv(input_path: Path | None) -> list[dict[str, str]]:
-    """Read CSV rows from a file or stdin."""
+def open_input(input_path: Path | None) -> TextIO:
+    """Open a CSV input file or return stdin."""
     if input_path is None:
-        return list(csv.DictReader(sys.stdin))
+        return sys.stdin
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    with input_path.open("r", newline="", encoding="utf-8") as csv_file:
-        return list(csv.DictReader(csv_file))
+    return input_path.open("r", newline="", encoding="utf-8")
 
 
-def write_json(data: list[dict], output_path: Path | None, pretty: bool) -> None:
-    """Write JSON to a file or stdout."""
+def write_json_stream(
+    rows: Iterable[dict[str, Any]],
+    output_path: Path | None,
+    *,
+    pretty: bool,
+) -> None:
+    """Write JSON array while streaming rows one at a time."""
     indent = 2 if pretty else None
 
-    if output_path is None:
-        json.dump(data, sys.stdout, indent=indent)
-        sys.stdout.write("\n")
-        return
+    output_file = output_path.open("w", encoding="utf-8") if output_path else sys.stdout
 
-    with output_path.open("w", encoding="utf-8") as json_file:
-        json.dump(data, json_file, indent=indent)
-        json_file.write("\n")
+    try:
+        output_file.write("[")
+        first = True
+
+        for row in rows:
+            if first:
+                first = False
+            else:
+                output_file.write(",")
+
+            if pretty:
+                output_file.write("\n")
+                output_file.write(json.dumps(row, indent=indent))
+            else:
+                output_file.write(json.dumps(row))
+
+        if pretty and not first:
+            output_file.write("\n")
+
+        output_file.write("]\n")
+
+    finally:
+        if output_path:
+            output_file.close()
 
 
 def main() -> None:
@@ -80,15 +79,16 @@ def main() -> None:
     try:
         columns = args.columns.split(",") if args.columns else None
 
-        rows = read_csv(args.input)
+        with open_input(args.input) as csv_file:
+            reader = csv.DictReader(csv_file)
 
-        data = csv_to_json(
-            rows,
-            infer_types=not args.no_infer_types,
-            columns=columns,
-        )
+            rows = csv_to_json_rows(
+                reader,
+                infer_types=not args.no_infer_types,
+                columns=columns,
+            )
 
-        write_json(data, args.output, args.pretty)
+            write_json_stream(rows, args.output, pretty=args.pretty)
 
     except (FileNotFoundError, ValueError, csv.Error) as error:
         print(f"Error: {error}", file=sys.stderr)
